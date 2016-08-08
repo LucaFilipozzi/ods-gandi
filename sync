@@ -1,0 +1,59 @@
+#!/usr/bin/python3
+# http://doc.rpc.gandi.net/domain/reference.html
+# https://wiki.opendnssec.org/display/DOCS/Key+Management
+
+import click
+import copy
+import logging
+import subprocess
+import xmlrpc.client
+import yaml
+
+@click.command()
+@click.option('--config', default='ods-gandi.yaml')
+@click.argument('domain')
+def cli(config, domain):
+    with open(config) as config_file:
+        config = yaml.load(config_file)
+        apikey = config['apikey']
+        api = xmlrpc.client.ServerProxy('https://rpc.gandi.net/xmlrpc/')
+
+        # extract have
+        have_orig = list()
+        for data in api.domain.dnssec.list(apikey, domain):
+            have_orig.append({'flags': data['flags'], 'algorithm': data['algorithm'], 'public_key': data['public_key'], 'id': data['id']})
+
+        have_copy = copy.deepcopy(have_orig)
+        for x in have_copy:
+            del x['id'] # key ids are not unique so can't compare them
+
+        # extract want
+        want_orig = list()
+        for row in subprocess.check_output(['ods-ksmutil', 'key', 'export', '-z', domain], universal_newlines=True).splitlines():
+            if not row or row.startswith(';'):
+                continue
+            data = row.split('\t')[4].split(' ', 4)
+            want_orig.append({'flags': int(data[0]), 'algorithm': int(data[2]), 'public_key': data[3], 'id': int(data[4].split(' ')[2])})
+
+        want_copy = copy.deepcopy(want_orig)
+        for x in want_copy:
+            del x['id'] # key ids are not unique so can't compare them
+
+        # delete if have but do not want
+        for row in have_orig:
+            key_id = row.pop('id')
+            if row not in want_copy:
+                print('del: %d' % key_id) # TODO logger
+                api.domain.dnssec.delete(apikey, key_id)
+
+        # create if want but do not have
+        for row in want_orig:
+            key_id = row.pop('id')
+            if row not in have_copy:
+                print('add: %d' % key_id) # TODO logger
+                api.domain.dnssec.create(apikey, domain, row)
+
+if __name__ == '__main__':
+    cli()
+
+# vim: set ts=4 sw=4 et si ai:
